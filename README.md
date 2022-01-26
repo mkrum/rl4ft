@@ -1,2 +1,2 @@
 # rl4ft
-Reinforcement learning finetuning step for langauge models
+An efficient reinforcement learning fine-tuning step for language models.
