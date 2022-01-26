@@ -1,0 +1,10 @@
+torch
+transformers
+datasets
+rich
+matplotlib
+nltk
+sentencepiece
+rouge_score
+jury
+sacrebleu
