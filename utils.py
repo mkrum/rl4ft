@@ -1,19 +1,17 @@
-
-#from stonefish.train.generate import get_lm_input
-#from t5 import get_outputs, write_output
+import os
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from datasets import load_dataset
 
+from rich import print
+
+
 class CommonGenEval(Dataset):
-
-    tokenizer = None
-
     def __init__(self, split, tokenizer):
         dataset = load_dataset("common_gen")
-        CommonGenEval.tokenizer = tokenizer #< Gross!
+        self.tokenizer = tokenizer
 
         dataset = dataset[split]
 
@@ -34,10 +32,85 @@ class CommonGenEval(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    @classmethod
-    def collate_fn(cls, batch):
-        starters, targets = zip(*batch)
-        return cls.tokenizer(list(starters), padding=True, return_tensors="pt"), targets
+    def make_collate_fn(self):
+        def collate_fn(batch):
+            starters, targets = zip(*batch)
+            return (
+                self.tokenizer(list(starters), padding=True, return_tensors="pt"),
+                targets,
+            )
+
+        return collate_fn
+
+
+def get_outputs(model, device, tokenizer, test_dl, do_sample=False, num_beams=None):
+    """
+    Runs inference, collects results into a list
+    """
+    states = []
+    generated = []
+    examples = []
+
+    for (batch_idx, (encoding, targets)) in enumerate(test_dl):
+        input_ids, attention_mask = encoding.input_ids.to(
+            device
+        ), encoding.attention_mask.to(device)
+        labels = targets.input_ids.to(device)
+
+        outputs = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_length=32,
+            do_sample=do_sample,
+            num_beams=num_beams,
+        )
+
+        states += tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+        generated += tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        examples += tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+    return states, generated, examples
+
+
+def make_collate(tokenizer):
+    def collate_fn(batch):
+        concepts = [" ".join(b["concepts"]) for b in batch]
+        targets = [b["target"] for b in batch]
+        concepts = tokenizer(concepts, padding=True, return_tensors="pt")
+        targets = tokenizer(targets, padding=True, return_tensors="pt")
+        return concepts, targets
+
+    return collate_fn
+
+
+def write_output(output_dir, epoch, states, generated, examples):
+    """
+    Write the model output into text files for evaluation.
+    """
+
+    for i in range(10):
+        print(f"[red]{states[i]} [green]-> [blue]{generated[i]}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    state_file = f"{output_dir}/states_{epoch}.txt"
+    generated_file = f"{output_dir}/generated_{epoch}.txt"
+    examples_file = f"{output_dir}/examples_{epoch}.txt"
+
+    with open(state_file, "w") as f:
+        for i in range(len(generated)):
+            f.write(states[i] + "\n")
+
+    with open(generated_file, "w") as f:
+        for i in range(len(generated)):
+            f.write(generated[i] + "\n")
+
+    with open(examples_file, "w") as f:
+        for i in range(len(generated)):
+            f.write(examples[i] + "\n")
+
+    return (state_file, generated_file, examples_file)
+
 
 def get_lm_input(
     self,
@@ -58,10 +131,11 @@ def get_lm_input(
     output_hidden_states=None,
     return_dict=None,
 ):
-    r"""
-    """
+    r""" """
     use_cache = use_cache if use_cache is not None else self.config.use_cache
-    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
 
     # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
     if head_mask is not None and decoder_head_mask is None:
@@ -93,7 +167,11 @@ def get_lm_input(
     if self.model_parallel:
         torch.cuda.set_device(self.decoder.first_device)
 
-    if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
+    if (
+        labels is not None
+        and decoder_input_ids is None
+        and decoder_inputs_embeds is None
+    ):
         # get decoder inputs from shifting lm labels to the right
         decoder_input_ids = self._shift_right(labels)
 
@@ -106,7 +184,9 @@ def get_lm_input(
         if attention_mask is not None:
             attention_mask = attention_mask.to(self.decoder.first_device)
         if decoder_attention_mask is not None:
-            decoder_attention_mask = decoder_attention_mask.to(self.decoder.first_device)
+            decoder_attention_mask = decoder_attention_mask.to(
+                self.decoder.first_device
+            )
 
     # Decode
     decoder_outputs = self.decoder(
@@ -138,4 +218,3 @@ def get_lm_input(
         sequence_output = sequence_output * (self.model_dim ** -0.5)
 
     return sequence_output
-

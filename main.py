@@ -13,6 +13,7 @@ from datasets import load_dataset
 from jury import Jury
 from rich import print
 
+from utils import get_outputs, write_output, make_collate
 from slogging import Logger
 
 
@@ -27,7 +28,7 @@ def compute_loss(model, encoding, target_encoding):
     return model(input_ids=input_ids, attention_mask=attention_mask, labels=labels).loss
 
 
-@dataclass
+@dataclass(frozen=True)
 class TrainingContext:
 
     eval_fn: Any
@@ -88,66 +89,6 @@ def run_eval(epoch, state_path, generated_path, examples_path):
     print(out)
 
 
-def get_outputs(model, device, tokenizer, test_dl, do_sample=False, num_beams=None):
-    """
-    Runs inference, collects results into a list
-    """
-    states = []
-    generated = []
-    examples = []
-
-    for (batch_idx, (encoding, targets)) in enumerate(test_dl):
-        input_ids, attention_mask = encoding.input_ids.to(
-            device
-        ), encoding.attention_mask.to(device)
-        labels = targets.input_ids.to(device)
-
-        outputs = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_length=32,
-            do_sample=do_sample,
-            num_beams=num_beams,
-        )
-
-        states += tokenizer.batch_decode(input_ids, skip_special_tokens=True)
-        generated += tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        examples += tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-    return states, generated, examples
-
-
-def write_output(epoch, states, generated, examples):
-    """
-    Write the model output into text files for evaluation.
-    """
-
-    for i in range(10):
-        print(f"[red]{states[i]} [green]-> [blue]{generated[i]}")
-
-    output_dir = f"{Logger.output_dir}/samples"
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    state_file = f"{output_dir}/states_{epoch}.txt"
-    generated_file = f"{output_dir}/generated_{epoch}.txt"
-    examples_file = f"{output_dir}/examples_{epoch}.txt"
-
-    with open(state_file, "w") as f:
-        for i in range(len(generated)):
-            f.write(states[i] + "\n")
-
-    with open(generated_file, "w") as f:
-        for i in range(len(generated)):
-            f.write(generated[i] + "\n")
-
-    with open(examples_file, "w") as f:
-        for i in range(len(generated)):
-            f.write(examples[i] + "\n")
-
-    return (state_file, generated_file, examples_file)
-
-
 def base_eval_fn(epoch, model, tokenizer, test_dl):
     """
     Writes output, runs evaluation in a seperate process
@@ -156,7 +97,8 @@ def base_eval_fn(epoch, model, tokenizer, test_dl):
     states, generated, examples = get_outputs(
         model, device, tokenizer, test_dl, num_beams=5
     )
-    files = write_output(epoch, states, generated, examples)
+    output_dir = f"{Logger.output_dir}/samples"
+    files = write_output(output_dir, epoch, states, generated, examples)
 
     p = mp.Process(target=run_eval, args=(epoch, *files))
     p.daemon = True
@@ -166,10 +108,6 @@ def base_eval_fn(epoch, model, tokenizer, test_dl):
 
 
 if __name__ == "__main__":
-    # batch_size=256, #t5-small
-    # batch_size=155, #t5-base
-    # batch_size=16, #t5-large
-
     parser = argparse.ArgumentParser()
 
     parser.add_argument("model_type")
@@ -189,26 +127,19 @@ if __name__ == "__main__":
 
     dataset = load_dataset("common_gen")
 
-    def collate_fn(batch):
-        concepts = [" ".join(b["concepts"]) for b in batch]
-        targets = [b["target"] for b in batch]
-        concepts = tokenizer(concepts, padding=True, return_tensors="pt")
-        targets = tokenizer(targets, padding=True, return_tensors="pt")
-        return concepts, targets
-
     train_dl = DataLoader(
         dataset["train"],
         batch_size=args.batch_size,
         drop_last=True,
         shuffle=True,
-        collate_fn=collate_fn,
+        collate_fn=make_collate(tokenizer),
     )
     test_dl = DataLoader(
         dataset["validation"],
         batch_size=args.batch_size,
         drop_last=False,
         shuffle=False,
-        collate_fn=collate_fn,
+        collate_fn=make_collate(tokenizer),
     )
 
     ctx = TrainingContext(base_eval_fn, compute_loss, train_dl, test_dl)

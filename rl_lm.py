@@ -14,8 +14,7 @@ from datasets import load_dataset
 from sacrebleu.metrics import BLEU
 
 from transformers import T5TokenizerFast, T5ForConditionalGeneration
-from utils import CommonGenEval, get_lm_input
-from main import get_outputs, write_output
+from utils import CommonGenEval, get_lm_input, get_outputs, write_output, make_collate
 from slogging import Logger
 
 
@@ -108,26 +107,20 @@ if __name__ == "__main__":
 
     dataset = load_dataset("common_gen")
 
-    def collate_fn(batch):
-        concepts = [" ".join(b["concepts"]) for b in batch]
-        targets = [b["target"] for b in batch]
-        concepts = tokenizer(concepts, padding=True, return_tensors="pt")
-        targets = tokenizer(targets, padding=True, return_tensors="pt")
-        return concepts, targets
-
+    train_data = CommonGenEval("train", tokenizer)
     train_dl = DataLoader(
-        CommonGenEval("train", tokenizer),
+        train_data,
         batch_size=args.batch_size,
         drop_last=True,
         shuffle=True,
-        collate_fn=CommonGenEval.collate_fn,
+        collate_fn=train_data.make_collate_fn(),
     )
     test_dl = DataLoader(
         dataset["validation"],
         batch_size=64,
         drop_last=False,
         shuffle=False,
-        collate_fn=collate_fn,
+        collate_fn=make_collate(tokenizer),
     )
 
     N = 100
@@ -150,7 +143,9 @@ if __name__ == "__main__":
                 states, generated, examples = get_outputs(
                     full, device, tokenizer, test_dl, num_beams=5
                 )
-                write_output(f"rl_{steps}", states, generated, examples)
+
+                output_dir = f"{Logger.output_dir}/samples"
+                write_output(output_dir, f"rl_{steps}", states, generated, examples)
                 torch.save(
                     model.state_dict(), f"{Logger.output_dir}/rl_head_{steps}.pth"
                 )
